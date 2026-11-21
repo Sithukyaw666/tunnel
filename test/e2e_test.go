@@ -3,10 +3,18 @@ package test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +22,60 @@ import (
 	"sithukyaw666/tunnel/internal/agent"
 	"sithukyaw666/tunnel/internal/server"
 )
+
+func generateTestCertificate(t testing.TB) (certPath, keyPath string, cleanup func()) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate private key: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Tunnel Test"},
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              []string{"localhost"},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "server.crt")
+	keyFile := filepath.Join(dir, "server.key")
+
+	certOut, err := os.Create(certFile)
+	if err != nil {
+		t.Fatalf("failed to create cert file: %v", err)
+	}
+	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	certOut.Close()
+
+	keyOut, err := os.Create(keyFile)
+	if err != nil {
+		t.Fatalf("failed to create key file: %v", err)
+	}
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("failed to marshal private key: %v", err)
+	}
+	pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: privBytes})
+	keyOut.Close()
+
+	return certFile, keyFile, func() {
+		os.Remove(certFile)
+		os.Remove(keyFile)
+	}
+}
 
 func startEchoServer(t testing.TB) (string, func()) {
 	t.Helper()
@@ -74,6 +136,8 @@ func setupTunnelEnvironment(t testing.TB, secret string) (publicAddr string, ser
 	privateAddr := privLn.Addr().String()
 	privLn.Close()
 
+	certFile, keyFile, certCleanup := generateTestCertificate(t)
+
 	echoAddr, echoCleanup := startEchoServer(t)
 
 	srvCtx, cancelSrv := context.WithCancel(context.Background())
@@ -81,6 +145,9 @@ func setupTunnelEnvironment(t testing.TB, secret string) (publicAddr string, ser
 		PublicEndpoint:  publicAddr,
 		PrivateEndpoint: privateAddr,
 		Secret:          secret,
+		TlsEnabled:      true,
+		Cert:            certFile,
+		Key:             keyFile,
 	})
 
 	srvErrCh := make(chan error, 1)
@@ -88,32 +155,28 @@ func setupTunnelEnvironment(t testing.TB, secret string) (publicAddr string, ser
 		srvErrCh <- srv.Run(srvCtx)
 	}()
 
-	var testConn net.Conn
-	for range 20 {
-		testConn, err = net.Dial("tcp", privateAddr)
+	for range 30 {
+		testConn, err := net.Dial("tcp", privateAddr)
 		if err == nil {
 			testConn.Close()
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if err != nil {
-		cancelSrv()
-		echoCleanup()
-		t.Fatalf("server failed to start listening on private endpoint: %v", err)
-	}
 
 	agCtx, cancelAg := context.WithCancel(context.Background())
 	ag := agent.New(nullLogger, agent.Config{
-		ServerEndpoint: privateAddr,
-		LocalEndpoint:  echoAddr,
-		Secret:         secret,
+		ServerEndpoint:     privateAddr,
+		LocalEndpoint:      echoAddr,
+		Secret:             secret,
+		InsecureSkipVerify: true,
 	})
 
 	if err := ag.HandleHandShake(); err != nil {
 		cancelAg()
 		cancelSrv()
 		echoCleanup()
+		certCleanup()
 		t.Fatalf("agent failed handshake: %v", err)
 	}
 
@@ -125,6 +188,7 @@ func setupTunnelEnvironment(t testing.TB, secret string) (publicAddr string, ser
 		cancelAg()
 		cancelSrv()
 		echoCleanup()
+		certCleanup()
 	}
 
 	return publicAddr, cancelSrv, cleanupAll
@@ -140,7 +204,7 @@ func TestEndToEndTunnel(t *testing.T) {
 	}
 	defer conn.Close()
 
-	message := []byte("hello, secure tunnel!")
+	message := []byte("hello, secure tunnel over TLS!")
 	if _, err := conn.Write(message); err != nil {
 		t.Fatalf("failed to write to public endpoint: %v", err)
 	}
@@ -249,16 +313,22 @@ func TestAgentBadSecretRejected(t *testing.T) {
 	privateAddr := privLn.Addr().String()
 	privLn.Close()
 
+	certFile, keyFile, certCleanup := generateTestCertificate(t)
+	defer certCleanup()
+
 	srvCtx := t.Context()
 
 	srv := server.New(nullLogger, server.Config{
 		PublicEndpoint:  "127.0.0.1:0",
 		PrivateEndpoint: privateAddr,
 		Secret:          "correct-secret",
+		TlsEnabled:      true,
+		Cert:            certFile,
+		Key:             keyFile,
 	})
 	go srv.Run(srvCtx)
 
-	for range 20 {
+	for range 30 {
 		conn, err := net.Dial("tcp", privateAddr)
 		if err == nil {
 			conn.Close()
@@ -268,9 +338,10 @@ func TestAgentBadSecretRejected(t *testing.T) {
 	}
 
 	ag := agent.New(nullLogger, agent.Config{
-		ServerEndpoint: privateAddr,
-		LocalEndpoint:  "127.0.0.1:4444",
-		Secret:         "wrong-secret",
+		ServerEndpoint:     privateAddr,
+		LocalEndpoint:      "127.0.0.1:4444",
+		Secret:             "wrong-secret",
+		InsecureSkipVerify: true,
 	})
 
 	err = ag.HandleHandShake()

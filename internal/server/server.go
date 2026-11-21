@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,9 @@ type Config struct {
 	PublicEndpoint  string
 	PrivateEndpoint string
 	Secret          string
+	TlsEnabled      bool
+	Cert            string
+	Key             string
 }
 
 type Server struct {
@@ -47,9 +51,26 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.public, err = net.Listen("tcp", s.cfg.PublicEndpoint); err != nil {
 		return fmt.Errorf("listen public: %w", err)
 	}
-	if s.private, err = net.Listen("tcp", s.cfg.PrivateEndpoint); err != nil {
-		s.public.Close()
-		return fmt.Errorf("listen agent: %w", err)
+	if s.cfg.TlsEnabled {
+		cert, err := tls.LoadX509KeyPair(s.cfg.Cert, s.cfg.Key)
+		if err != nil {
+			s.logger.Error("[TLS] error loading certificate", "error", err)
+			s.public.Close()
+			return fmt.Errorf("error loading certificate: %w", err)
+		}
+		cfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+		s.private, err = tls.Listen("tcp", s.cfg.PrivateEndpoint, cfg)
+		if err != nil {
+			s.public.Close()
+			return fmt.Errorf("error listen private: %w", err)
+		}
+	} else {
+		if s.private, err = net.Listen("tcp", s.cfg.PrivateEndpoint); err != nil {
+			s.public.Close()
+			return fmt.Errorf("listen agent: %w", err)
+		}
 	}
 	s.logger.Info("public listening", "endpoint", s.cfg.PublicEndpoint)
 	s.logger.Info("agent listening", "endpoint", s.cfg.PrivateEndpoint)

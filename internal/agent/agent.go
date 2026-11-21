@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"sithukyaw666/tunnel/internal/pipe"
 	"sithukyaw666/tunnel/internal/proto"
@@ -15,9 +16,10 @@ import (
 )
 
 type Config struct {
-	ServerEndpoint string
-	LocalEndpoint  string
-	Secret         string
+	ServerEndpoint     string
+	LocalEndpoint      string
+	Secret             string
+	InsecureSkipVerify bool
 }
 
 type Agent struct {
@@ -35,7 +37,10 @@ func New(logger *slog.Logger, cfg Config) *Agent {
 }
 
 func (a *Agent) HandleHandShake() error {
-	conn, err := net.Dial("tcp", a.cfg.ServerEndpoint)
+	cfg := &tls.Config{
+		InsecureSkipVerify: a.cfg.InsecureSkipVerify,
+	}
+	conn, err := tls.Dial("tcp", a.cfg.ServerEndpoint, cfg)
 	if err != nil {
 		a.logger.Error("[HandShake] error dialing server", "endpoint", a.cfg.ServerEndpoint, "error", err)
 		return err
