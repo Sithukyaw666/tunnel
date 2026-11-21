@@ -2,12 +2,11 @@ package pipe
 
 import (
 	"io"
-	"net"
 )
 
-func Pipe(a, b net.Conn) {
+func Pipe(a, b io.ReadWriteCloser) {
 	done := make(chan struct{}, 2)
-	cp := func(dst, src net.Conn) {
+	cp := func(dst, src io.ReadWriteCloser) {
 		io.Copy(dst, src)
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite()

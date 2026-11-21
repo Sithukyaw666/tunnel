@@ -4,27 +4,27 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/hashicorp/yamux"
+	"github.com/quic-go/quic-go"
 )
 
 type Registry struct {
 	mu       sync.RWMutex
-	Sessions map[string]*yamux.Session
+	Sessions map[string]*quic.Conn
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		Sessions: make(map[string]*yamux.Session),
+		Sessions: make(map[string]*quic.Conn),
 	}
 }
 
-func (r *Registry) AddSession(hostname string, s *yamux.Session) {
+func (r *Registry) AddSession(hostname string, s *quic.Conn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Sessions[hostname] = s
 }
 
-func (r *Registry) GetSession(hostname string) (*yamux.Session, error) {
+func (r *Registry) GetSession(hostname string) (*quic.Conn, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if t, ok := r.Sessions[hostname]; ok {

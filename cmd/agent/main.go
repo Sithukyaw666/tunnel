@@ -37,7 +37,7 @@ func main() {
 	}
 	agent := agent.New(logger, config)
 	logger.Info("[Agent] initiating handshake...")
-	if err := agent.HandleHandShake(); err != nil {
+	if err := agent.HandleHandShake(ctx); err != nil {
 		logger.Error("[Agent] error handshake", "error", err)
 		return
 	}

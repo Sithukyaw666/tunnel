@@ -172,7 +172,7 @@ func setupTunnelEnvironment(t testing.TB, secret string) (publicAddr string, ser
 		InsecureSkipVerify: true,
 	})
 
-	if err := ag.HandleHandShake(); err != nil {
+	if err := ag.HandleHandShake(agCtx); err != nil {
 		cancelAg()
 		cancelSrv()
 		echoCleanup()
@@ -344,7 +344,7 @@ func TestAgentBadSecretRejected(t *testing.T) {
 		InsecureSkipVerify: true,
 	})
 
-	err = ag.HandleHandShake()
+	err = ag.HandleHandShake(t.Context())
 	if err == nil {
 		t.Fatalf("expected agent handshake to fail with bad secret, but it succeeded")
 	}

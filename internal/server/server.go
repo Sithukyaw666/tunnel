@@ -11,10 +11,9 @@ import (
 	"sithukyaw666/tunnel/internal/pipe"
 	"sithukyaw666/tunnel/internal/proto"
 	"sithukyaw666/tunnel/internal/registry"
-
 	"time"
 
-	"github.com/hashicorp/yamux"
+	quic "github.com/quic-go/quic-go"
 )
 
 // default hostname hardcoded
@@ -32,7 +31,7 @@ type Config struct {
 type Server struct {
 	logger   *slog.Logger
 	public   net.Listener
-	private  net.Listener
+	private  *quic.Listener
 	registry *registry.Registry
 	cfg      Config
 }
@@ -51,26 +50,26 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.public, err = net.Listen("tcp", s.cfg.PublicEndpoint); err != nil {
 		return fmt.Errorf("listen public: %w", err)
 	}
-	if s.cfg.TlsEnabled {
-		cert, err := tls.LoadX509KeyPair(s.cfg.Cert, s.cfg.Key)
-		if err != nil {
-			s.logger.Error("[TLS] error loading certificate", "error", err)
-			s.public.Close()
-			return fmt.Errorf("error loading certificate: %w", err)
-		}
-		cfg := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		}
-		s.private, err = tls.Listen("tcp", s.cfg.PrivateEndpoint, cfg)
-		if err != nil {
-			s.public.Close()
-			return fmt.Errorf("error listen private: %w", err)
-		}
-	} else {
-		if s.private, err = net.Listen("tcp", s.cfg.PrivateEndpoint); err != nil {
-			s.public.Close()
-			return fmt.Errorf("listen agent: %w", err)
-		}
+	if !s.cfg.TlsEnabled {
+		s.logger.Error("[TLS] quic requied tls")
+		return errors.New("tls not enabled")
+	}
+	cert, err := tls.LoadX509KeyPair(s.cfg.Cert, s.cfg.Key)
+	if err != nil {
+		s.logger.Error("[TLS] error loading certificate", "error", err)
+		s.public.Close()
+		return fmt.Errorf("error loading certificate: %w", err)
+	}
+	cfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+	s.private, err = quic.ListenAddr(s.cfg.PrivateEndpoint, cfg, &quic.Config{
+		MaxIdleTimeout:  30 * time.Second,
+		KeepAlivePeriod: 5 * time.Second,
+	})
+	if err != nil {
+		s.public.Close()
+		return fmt.Errorf("error listen private: %w", err)
 	}
 	s.logger.Info("public listening", "endpoint", s.cfg.PublicEndpoint)
 	s.logger.Info("agent listening", "endpoint", s.cfg.PrivateEndpoint)
@@ -82,12 +81,12 @@ func (s *Server) Run(ctx context.Context) error {
 		s.public.Close()
 	}()
 
-	go s.servePrivate()
-	s.servePublic() // blocks until the public listener is closed
+	go s.servePrivate(ctx)
+	s.servePublic(ctx) // blocks until the public listener is closed
 	return nil
 }
 
-func (s *Server) servePublic() {
+func (s *Server) servePublic(ctx context.Context) {
 	s.logger.Info("Accepting public connection...")
 	for {
 		conn, err := s.public.Accept()
@@ -100,11 +99,11 @@ func (s *Server) servePublic() {
 				continue
 			}
 		}
-		go s.handlePublic(conn)
+		go s.handlePublic(ctx, conn)
 	}
 }
 
-func (s *Server) handlePublic(conn net.Conn) {
+func (s *Server) handlePublic(ctx context.Context, conn net.Conn) {
 
 	session, err := s.registry.GetSession(hostname)
 	if err != nil {
@@ -113,7 +112,7 @@ func (s *Server) handlePublic(conn net.Conn) {
 		return
 
 	}
-	muxedConn, err := session.Open()
+	muxedConn, err := session.OpenStreamSync(ctx)
 	if err != nil {
 		s.logger.Error("[Public], error opening muxed conn over session", "error", err)
 		conn.Close()
@@ -122,68 +121,63 @@ func (s *Server) handlePublic(conn net.Conn) {
 	pipe.Pipe(conn, muxedConn)
 }
 
-func (s *Server) servePrivate() {
+func (s *Server) servePrivate(ctx context.Context) {
 	for {
-		conn, err := s.private.Accept()
+		conn, err := s.private.Accept(ctx)
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				s.logger.Error("[Private] closed connection")
+			if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				s.logger.Info("[Private] listener closed")
 				break
+
 			} else {
 				s.logger.Warn("[Private] error accepting connection", "error", err)
 				continue
 			}
 		}
-		go s.handlePrivate(conn)
+		go s.handlePrivate(ctx, conn)
 	}
 }
 
-func (s *Server) handlePrivate(conn net.Conn) {
+func (s *Server) handlePrivate(ctx context.Context, conn *quic.Conn) {
 
 	s.logger.Info("[Server] handshake request received from agent")
-	err := s.authenticate(conn)
+	stream, err := conn.AcceptStream(ctx)
+	if err != nil {
+		s.logger.Error("[Server-QUIC] error opening stream", "error", err)
+		return
+	}
+
+	err = s.authenticate(stream)
 	if err != nil {
 		s.logger.Error("[HandShake] authentication failed", "error", err)
-		if err := proto.Send(conn, proto.AuthFail); err != nil {
+		if err := proto.Send(stream, proto.AuthFail); err != nil {
 			s.logger.Error("[HandShake] error sending fail signal", "error", err)
 		}
-
-		conn.Close()
+		stream.Close()
 		return
 
 	}
 	s.logger.Info("[Server] handshake completed successfully")
-	if err := proto.Send(conn, proto.AuthSucceed); err != nil {
+	if err := proto.Send(stream, proto.AuthSucceed); err != nil {
 		s.logger.Error("[HandShake] error sending success signal", "error", err)
-		conn.Close()
+		stream.Close()
 		return
 	}
 
-	cfg := yamux.DefaultConfig()
-	cfg.EnableKeepAlive = true
-	cfg.KeepAliveInterval = 5 * time.Second
-	session, err := yamux.Server(conn, cfg)
-	if err != nil {
-		s.logger.Error("[Private] error creating mux session", "error", err)
-		conn.Close()
-		return
-	}
-
-	s.registry.AddSession(hostname, session)
+	s.registry.AddSession(hostname, conn)
 
 	//healthcheck
-
 	go func() {
-		<-session.CloseChan()
+		<-conn.Context().Done()
 		s.logger.Warn("[HealthCheck] Agent somehow close the connection")
 		s.logger.Info("[HealthCheck] removing tunnel from registry", "hostname", hostname)
 		s.registry.RemoveSession(hostname)
-		conn.Close()
+
 	}()
 
 }
 
-func (s *Server) authenticate(conn net.Conn) error {
+func (s *Server) authenticate(conn *quic.Stream) error {
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	defer conn.SetReadDeadline(time.Time{})
 	secret, err := proto.Receive(conn)
