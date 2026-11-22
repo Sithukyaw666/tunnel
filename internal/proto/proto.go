@@ -2,12 +2,17 @@ package proto
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 )
 
 const AuthSucceed = "succeed"
 const AuthFail = "fail"
-const HeaderSize = 4 // 4 byte for prefix
+const HeaderSize = 4             // 4 byte for prefix
+const MaxPayloadSize = 64 * 1024 //64KB
+
+var ErrPayloadTooLarge = errors.New("payload exceeds maximum allowed size")
 
 func Send(conn io.Writer, payload string) error {
 	buf := make([]byte, HeaderSize+len(payload))
@@ -25,6 +30,9 @@ func Receive(conn io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	length := binary.BigEndian.Uint32(header[:])
+	if length > MaxPayloadSize {
+		return nil, fmt.Errorf("%w: %d bytes (limit %d)", ErrPayloadTooLarge, length, MaxPayloadSize)
+	}
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(conn, payload); err != nil {
 		return nil, err
