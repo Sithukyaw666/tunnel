@@ -24,16 +24,24 @@ func main() {
 		logger.Warn("[ENV] env not set, assumed dev")
 		env = "dev"
 	}
+
 	var insecureSkipVerify bool
 	if env == "dev" {
 		logger.Info("[ENV] dev environment, setting insecureSkipVerify = true")
 		insecureSkipVerify = true
+	}
+
+	transport := os.Getenv("TRANSPORT_PROTO")
+	if transport == "" {
+		logger.Warn("[ENV] TRANSPORT_PROTO not configured, using default (yamux)")
+		transport = "yamux"
 	}
 	config := agent.Config{
 		ServerEndpoint:     "0.0.0.0:3030",
 		LocalEndpoint:      "0.0.0.0:4444",
 		Secret:             secret,
 		InsecureSkipVerify: insecureSkipVerify,
+		Transport:          transport,
 	}
 	agent := agent.New(logger, config)
 	logger.Info("[Agent] initiating handshake...")

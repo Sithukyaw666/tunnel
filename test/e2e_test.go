@@ -148,6 +148,7 @@ func setupTunnelEnvironment(t testing.TB, secret string) (publicAddr string, ser
 		TlsEnabled:      true,
 		Cert:            certFile,
 		Key:             keyFile,
+		Transport:       "yamux",
 	})
 
 	srvErrCh := make(chan error, 1)
@@ -170,6 +171,7 @@ func setupTunnelEnvironment(t testing.TB, secret string) (publicAddr string, ser
 		LocalEndpoint:      echoAddr,
 		Secret:             secret,
 		InsecureSkipVerify: true,
+		Transport:          "yamux",
 	})
 
 	if err := ag.HandleHandShake(agCtx); err != nil {

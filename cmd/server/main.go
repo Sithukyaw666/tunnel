@@ -31,6 +31,12 @@ func main() {
 		logger.Warn("[ENV] SECRET not configured, using default")
 		secret = "B45X9TPvkYp5Ij0w18qQi861OdiBjY8dV40xMk1E6cs="
 	}
+
+	transport := os.Getenv("TRANSPORT_PROTO")
+	if transport == "" {
+		logger.Warn("[ENV] TRANSPORT_PROTO not configured, using default (yamux)")
+		transport = "yamux"
+	}
 	var tlsEnabled bool
 	key := os.Getenv("CERT_KEY")
 	cert := os.Getenv("CERT")
@@ -46,6 +52,7 @@ func main() {
 		PrivateEndpoint: private_endpoint,
 		Secret:          secret,
 		TlsEnabled:      tlsEnabled,
+		Transport:       transport,
 		Key:             key,
 		Cert:            cert,
 	}

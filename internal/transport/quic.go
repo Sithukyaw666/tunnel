@@ -29,6 +29,17 @@ func NewQUICListener(addr string, tlsConfig *tls.Config) (Listener, error) {
 	return &quicListener{listener}, nil
 }
 
+func QUICDial(ctx context.Context, addr string, tlsCfg *tls.Config) (Session, error) {
+	conn, err := quic.DialAddr(ctx, addr, tlsCfg, &quic.Config{
+		MaxIdleTimeout:  30 * time.Second,
+		KeepAlivePeriod: 5 * time.Second,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &quicSession{conn}, nil
+}
+
 func (ql *quicListener) Accept(ctx context.Context) (Session, error) {
 	conn, err := ql.l.Accept(ctx)
 	if err != nil {

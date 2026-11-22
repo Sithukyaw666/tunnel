@@ -14,11 +14,8 @@ import (
 	"sithukyaw666/tunnel/internal/registry"
 	"sithukyaw666/tunnel/internal/transport"
 	"time"
-
-	quic "github.com/quic-go/quic-go"
 )
 
-// default hostname hardcoded
 var hostname = "www.example.com"
 
 type Config struct {
@@ -26,6 +23,7 @@ type Config struct {
 	PrivateEndpoint string
 	Secret          string
 	TlsEnabled      bool
+	Transport       string
 	Cert            string
 	Key             string
 }
@@ -52,26 +50,48 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.public, err = net.Listen("tcp", s.cfg.PublicEndpoint); err != nil {
 		return fmt.Errorf("listen public: %w", err)
 	}
+
 	if !s.cfg.TlsEnabled {
-		s.logger.Error("[TLS] quic requied tls")
-		return errors.New("tls not enabled")
+		if s.cfg.Transport == "quic" {
+			s.logger.Error("[Transport] QUIC required TLS")
+			return errors.New("QUIC required TLS")
+		}
+		s.private, err = transport.NewYamuxListener(s.cfg.PrivateEndpoint, nil)
+		if err != nil {
+			s.logger.Error("[Private] error listening", "endpoint", s.cfg.PrivateEndpoint)
+			return err
+		}
+	} else {
+
+		cert, err := tls.LoadX509KeyPair(s.cfg.Cert, s.cfg.Key)
+		if err != nil {
+			s.logger.Error("[TLS] error loading certificate", "error", err)
+			s.public.Close()
+			return fmt.Errorf("error loading certificate: %w", err)
+		}
+		cfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+		switch s.cfg.Transport {
+		case "quic":
+			s.private, err = transport.NewQUICListener(s.cfg.PrivateEndpoint, cfg)
+			if err != nil {
+				s.logger.Error("[Private] error listening", "endpoint", s.cfg.PrivateEndpoint, "transport", "quic")
+				return err
+			}
+		case "yamux":
+			s.private, err = transport.NewYamuxListener(s.cfg.PrivateEndpoint, cfg)
+			if err != nil {
+				s.logger.Error("[Private] error listening", "endpoint", s.cfg.PrivateEndpoint, "transport", "yamux")
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported transport: %s", s.cfg.Transport)
+		}
 	}
-	cert, err := tls.LoadX509KeyPair(s.cfg.Cert, s.cfg.Key)
-	if err != nil {
-		s.logger.Error("[TLS] error loading certificate", "error", err)
-		s.public.Close()
-		return fmt.Errorf("error loading certificate: %w", err)
-	}
-	cfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	}
-	s.private, err = transport.NewQUICListener(s.cfg.PrivateEndpoint, cfg)
-	if err != nil {
-		s.public.Close()
-		return fmt.Errorf("error listen private: %w", err)
-	}
+
 	s.logger.Info("public listening", "endpoint", s.cfg.PublicEndpoint)
-	s.logger.Info("agent listening", "endpoint", s.cfg.PrivateEndpoint)
+	s.logger.Info("agent listening", "endpoint", s.cfg.PrivateEndpoint, "transport", s.cfg.Transport)
 
 	go func() {
 		<-ctx.Done()
@@ -153,6 +173,7 @@ func (s *Server) handlePrivate(ctx context.Context, conn transport.Session) {
 			s.logger.Error("[HandShake] error sending fail signal", "error", err)
 		}
 		stream.Close()
+		conn.Close()
 		return
 
 	}
@@ -162,22 +183,27 @@ func (s *Server) handlePrivate(ctx context.Context, conn transport.Session) {
 		stream.Close()
 		return
 	}
+	stream.Close()
 
-	s.registry.AddSession(hostname, conn)
+	old := s.registry.AddSession(hostname, conn)
+	if old != nil {
+		s.logger.Warn("[Session] hostname already exist, replacing")
+		old.Close()
+	}
 
 	//healthcheck
 	go func() {
 		<-conn.Done()
 		s.logger.Warn("[HealthCheck] Agent somehow close the connection")
 		s.logger.Info("[HealthCheck] removing tunnel from registry", "hostname", hostname)
-		s.registry.RemoveSession(hostname)
+		s.registry.RemoveSession(hostname, conn)
 
 	}()
 
 }
 
 func (s *Server) authenticate(conn io.ReadWriteCloser) error {
-	if qs, ok := conn.(*quic.Stream); ok {
+	if qs, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
 		qs.SetReadDeadline(time.Now().Add(5 * time.Second))
 		defer qs.SetReadDeadline(time.Time{})
 	}

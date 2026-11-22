@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"sithukyaw666/tunnel/internal/pipe"
 	"sithukyaw666/tunnel/internal/proto"
-	"time"
+	"sithukyaw666/tunnel/internal/transport"
 
 	"errors"
 	"io"
 	"log/slog"
 	"net"
-
-	"github.com/quic-go/quic-go"
 )
 
 type Config struct {
@@ -21,12 +19,13 @@ type Config struct {
 	LocalEndpoint      string
 	Secret             string
 	InsecureSkipVerify bool
+	Transport          string
 }
 
 type Agent struct {
-	cfg    Config
-	logger *slog.Logger
-	conn   *quic.Conn
+	cfg     Config
+	logger  *slog.Logger
+	session transport.Session
 }
 
 func New(logger *slog.Logger, cfg Config) *Agent {
@@ -37,18 +36,28 @@ func New(logger *slog.Logger, cfg Config) *Agent {
 }
 
 func (a *Agent) HandleHandShake(ctx context.Context) error {
+	var session transport.Session
+	var err error
 	cfg := &tls.Config{
 		InsecureSkipVerify: a.cfg.InsecureSkipVerify,
 	}
-	conn, err := quic.DialAddr(ctx, a.cfg.ServerEndpoint, cfg, &quic.Config{
-		MaxIdleTimeout:  30 * time.Second,
-		KeepAlivePeriod: 5 * time.Second,
-	})
-	if err != nil {
-		a.logger.Error("[HandShake] error dialing server", "endpoint", a.cfg.ServerEndpoint, "error", err)
-		return err
+	switch a.cfg.Transport {
+	case "quic":
+		session, err = transport.QUICDial(ctx, a.cfg.ServerEndpoint, cfg)
+		if err != nil {
+			a.logger.Error("[HandShake] error dialing server", "endpoint", a.cfg.ServerEndpoint, "transport", "quic", "error", err)
+			return err
+		}
+	case "yamux":
+		session, err = transport.YamuxDial(a.cfg.ServerEndpoint, cfg)
+		if err != nil {
+			a.logger.Error("[HandShake] error dialing server", "endpoint", a.cfg.ServerEndpoint, "transport", "yamux", "error", err)
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported transport: %s", a.cfg.Transport)
 	}
-	stream, err := conn.OpenStream()
+	stream, err := session.Open(ctx)
 	if err != nil {
 		a.logger.Error("[HandShake] error opening quic stream", "error", err)
 		return err
@@ -67,19 +76,19 @@ func (a *Agent) HandleHandShake(ctx context.Context) error {
 
 	switch string(signal) {
 	case proto.AuthSucceed:
-		a.conn = conn
+		a.session = session
 		stream.Close()
 		return nil
 	case proto.AuthFail:
 		a.logger.Error("[HandShake] bad secret")
 		stream.Close()
-		conn.CloseWithError(0, "bad secret")
+		session.Close()
 		return errors.New("bad secret")
 	default:
 		a.logger.Error("[HandShake] unknown signal received", "signal",
 			string(signal))
 		stream.Close()
-		conn.CloseWithError(0, "unknown signal")
+		session.Close()
 		return fmt.Errorf("unexpected handshake signal: %s", string(signal))
 	}
 
@@ -89,8 +98,8 @@ func (a *Agent) Handle(ctx context.Context) {
 	go func() {
 		<-ctx.Done()
 		a.logger.Info("[Agent] shutting down", "cause", context.Cause(ctx))
-		if a.conn != nil {
-			a.conn.CloseWithError(0, "connection closed")
+		if a.session != nil {
+			a.session.Close()
 		}
 	}()
 	a.handleRequest(ctx)
@@ -98,9 +107,15 @@ func (a *Agent) Handle(ctx context.Context) {
 
 func (a *Agent) handleRequest(ctx context.Context) {
 	for {
-		stream, err := a.conn.AcceptStream(ctx)
+		stream, err := a.session.Accept(ctx)
 		if err != nil {
-			if errors.Is(err, quic.ErrStreamClosed) || a.conn.Context().Err() != nil || errors.Is(err, context.Canceled) {
+			select {
+			case <-a.session.Done():
+				a.logger.Error("[Agent] connection closed")
+				return
+			default:
+			}
+			if errors.Is(err, context.Canceled) {
 				a.logger.Error("[Agent] connection closed")
 				break
 			} else {

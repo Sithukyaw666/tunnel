@@ -149,6 +149,7 @@ func setupQUICEnvironment(t testing.TB, secret string) (string, context.CancelFu
 		TlsEnabled:      true,
 		Cert:            certFile,
 		Key:             keyFile,
+		Transport:       "quic",
 	})
 
 	go srv.Run(srvCtx)
@@ -172,6 +173,7 @@ func setupQUICEnvironment(t testing.TB, secret string) (string, context.CancelFu
 		LocalEndpoint:      echoAddr,
 		Secret:             secret,
 		InsecureSkipVerify: true,
+		Transport:          "quic",
 	})
 
 	if err := ag.HandleHandShake(agCtx); err != nil {
