@@ -2,29 +2,28 @@ package registry
 
 import (
 	"fmt"
+	"sithukyaw666/tunnel/internal/transport"
 	"sync"
-
-	"github.com/quic-go/quic-go"
 )
 
 type Registry struct {
 	mu       sync.RWMutex
-	Sessions map[string]*quic.Conn
+	Sessions map[string]transport.Session
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		Sessions: make(map[string]*quic.Conn),
+		Sessions: make(map[string]transport.Session),
 	}
 }
 
-func (r *Registry) AddSession(hostname string, s *quic.Conn) {
+func (r *Registry) AddSession(hostname string, s transport.Session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Sessions[hostname] = s
 }
 
-func (r *Registry) GetSession(hostname string) (*quic.Conn, error) {
+func (r *Registry) GetSession(hostname string) (transport.Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if t, ok := r.Sessions[hostname]; ok {

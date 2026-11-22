@@ -6,11 +6,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sithukyaw666/tunnel/internal/pipe"
 	"sithukyaw666/tunnel/internal/proto"
 	"sithukyaw666/tunnel/internal/registry"
+	"sithukyaw666/tunnel/internal/transport"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
@@ -31,7 +33,7 @@ type Config struct {
 type Server struct {
 	logger   *slog.Logger
 	public   net.Listener
-	private  *quic.Listener
+	private  transport.Listener
 	registry *registry.Registry
 	cfg      Config
 }
@@ -63,10 +65,7 @@ func (s *Server) Run(ctx context.Context) error {
 	cfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 	}
-	s.private, err = quic.ListenAddr(s.cfg.PrivateEndpoint, cfg, &quic.Config{
-		MaxIdleTimeout:  30 * time.Second,
-		KeepAlivePeriod: 5 * time.Second,
-	})
+	s.private, err = transport.NewQUICListener(s.cfg.PrivateEndpoint, cfg)
 	if err != nil {
 		s.public.Close()
 		return fmt.Errorf("error listen private: %w", err)
@@ -112,7 +111,7 @@ func (s *Server) handlePublic(ctx context.Context, conn net.Conn) {
 		return
 
 	}
-	muxedConn, err := session.OpenStreamSync(ctx)
+	muxedConn, err := session.Open(ctx)
 	if err != nil {
 		s.logger.Error("[Public], error opening muxed conn over session", "error", err)
 		conn.Close()
@@ -138,10 +137,10 @@ func (s *Server) servePrivate(ctx context.Context) {
 	}
 }
 
-func (s *Server) handlePrivate(ctx context.Context, conn *quic.Conn) {
+func (s *Server) handlePrivate(ctx context.Context, conn transport.Session) {
 
 	s.logger.Info("[Server] handshake request received from agent")
-	stream, err := conn.AcceptStream(ctx)
+	stream, err := conn.Accept(ctx)
 	if err != nil {
 		s.logger.Error("[Server-QUIC] error opening stream", "error", err)
 		return
@@ -168,7 +167,7 @@ func (s *Server) handlePrivate(ctx context.Context, conn *quic.Conn) {
 
 	//healthcheck
 	go func() {
-		<-conn.Context().Done()
+		<-conn.Done()
 		s.logger.Warn("[HealthCheck] Agent somehow close the connection")
 		s.logger.Info("[HealthCheck] removing tunnel from registry", "hostname", hostname)
 		s.registry.RemoveSession(hostname)
@@ -177,9 +176,11 @@ func (s *Server) handlePrivate(ctx context.Context, conn *quic.Conn) {
 
 }
 
-func (s *Server) authenticate(conn *quic.Stream) error {
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	defer conn.SetReadDeadline(time.Time{})
+func (s *Server) authenticate(conn io.ReadWriteCloser) error {
+	if qs, ok := conn.(*quic.Stream); ok {
+		qs.SetReadDeadline(time.Now().Add(5 * time.Second))
+		defer qs.SetReadDeadline(time.Time{})
+	}
 	secret, err := proto.Receive(conn)
 	if err != nil {
 		return err
