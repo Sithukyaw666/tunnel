@@ -56,7 +56,7 @@ func main() {
 		Key:             key,
 		Cert:            cert,
 	}
-	server := server.New(logger, config)
-	server.Run(ctx)
+	srv := server.New(logger, config)
+	srv.Run(ctx)
 
 }

@@ -25,6 +25,18 @@ func main() {
 		env = "dev"
 	}
 
+	serverEndpoint := os.Getenv("SERVER_ENDPOINT")
+	if serverEndpoint == "" {
+		logger.Warn("[ENV] SERVER_ENDPOINT not configured, using default")
+		serverEndpoint = "0.0.0.0:3030"
+	}
+
+	localEndpoint := os.Getenv("LOCAL_ENDPOINT")
+	if localEndpoint == "" {
+		logger.Warn("[ENV] LOCAL_ENDPOINT not configured, using default")
+		localEndpoint = "0.0.0.0:4444"
+	}
+
 	var insecureSkipVerify bool
 	if env == "dev" {
 		logger.Info("[ENV] dev environment, setting insecureSkipVerify = true")
@@ -37,19 +49,19 @@ func main() {
 		transport = "yamux"
 	}
 	config := agent.Config{
-		ServerEndpoint:     "0.0.0.0:3030",
-		LocalEndpoint:      "0.0.0.0:4444",
+		ServerEndpoint:     serverEndpoint,
+		LocalEndpoint:      localEndpoint,
 		Secret:             secret,
 		InsecureSkipVerify: insecureSkipVerify,
 		Transport:          transport,
 	}
-	agent := agent.New(logger, config)
+	ag := agent.New(logger, config)
 	logger.Info("[Agent] initiating handshake...")
-	if err := agent.HandleHandShake(ctx); err != nil {
+	if err := ag.HandleHandShake(ctx); err != nil {
 		logger.Error("[Agent] error handshake", "error", err)
 		return
 	}
 	logger.Info("[Agent] handshake completed successfully")
 	logger.Info("[Agent] started handling connection...")
-	agent.Handle(ctx)
+	ag.Handle(ctx)
 }

@@ -17,6 +17,10 @@ func NewRegistry() *Registry {
 	}
 }
 
+func (r *Registry) ListSessions() map[string]transport.Session {
+	return r.sessions
+}
+
 func (r *Registry) AddSession(hostname string, s transport.Session) (old transport.Session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
